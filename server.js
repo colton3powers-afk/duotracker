@@ -27,7 +27,7 @@ async function getZip(zip){
   parts.slice(offset,offset+12).forEach((part,i)=>url.searchParams.set(`parts.${i}`,part));
   await sleep(Math.max(0,nextAppleRequestAt-Date.now()));
   if(Date.now()<blockedUntil)throw new Error(blockMessage);
-  nextAppleRequestAt=Date.now()+3000;
+  nextAppleRequestAt=Date.now()+10000;
   const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),12000);
   try{
    const response=await fetch(url,{signal:controller.signal,headers:{'Accept':'application/json','User-Agent':'Mozilla/5.0 (compatible; DuoRadar/1.0)'}});
