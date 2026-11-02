@@ -9,11 +9,14 @@ const parseVariants=(prefix,model)=>{const parts=(process.env[prefix+'_PARTS']||
 const variants=[...parseVariants('DUO','duo'),...parseVariants('PRO_MAX','pro')];const parts=variants.map(v=>v.part);const labels=variants.map(v=>v.label);
 const CACHE_MS=Math.max(60000,Number(process.env.CACHE_SECONDS||120)*1000);
 const cache=new Map(), history=[];
+let blockedUntil=0,scanning=false;
+const blockMessage="Apple declined inventory requests (HTTP 541). Live availability cannot be verified. Checks are paused for 15 minutes; confirm pickup on apple.com.";
 const seeds=['32084','10001','02108','19103','20001','30303','33131','37203','43215','48226','55401','60601','63101','64106','70112','75201','77002','78205','80202','84101','85004','87102','89101','90012','92101','94103','95113','97204','98101','96813','99501'];
 const extra=(process.env.EXTRA_ZIPS||'').split(',').map(s=>s.trim()).filter(s=>/^\d{5}$/.test(s));
 const usZips=[...new Set([...seeds,...extra])];
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function getZip(zip){
+ if(Date.now()<blockedUntil)throw new Error(blockMessage);
  const old=cache.get(zip); if(old&&Date.now()-old.at<CACHE_MS)return old.data;
  const merged=new Map();
  // Apple may omit trailing parts in large requests. Check at most 12 at a time.
@@ -24,6 +27,7 @@ async function getZip(zip){
   const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),12000);
   try{
    const response=await fetch(url,{signal:controller.signal,headers:{'Accept':'application/json','User-Agent':'Mozilla/5.0 (compatible; DuoRadar/1.0)'}});
+   if(response.status===541){blockedUntil=Date.now()+15*60*1000;throw new Error(blockMessage)}
    if(!response.ok)throw new Error(`Apple returned HTTP ${response.status}`);
    const batch=await response.json();
    if(!Array.isArray(batch?.body?.stores))throw new Error('Apple response did not contain stores');
@@ -54,9 +58,13 @@ app.get('/api/config',(_req,res)=>res.json({configured:parts.length>0,variants,s
 app.get('/api/history',(_req,res)=>res.json({events:history,note:'Events observed by this running server only; no historical database.'}));
 app.get('/api/stock',async(req,res)=>{
  if(!parts.length)return res.status(503).json({error:'Set DUO_PARTS and/or PRO_MAX_PARTS in .env before live checks can run.'});
- const zip=String(req.query.zip||'32084'),scope=String(req.query.scope||'national');
+ if(Date.now()<blockedUntil)return res.status(503).json({error:blockMessage,code:'APPLE_BLOCKED',retryAfterSeconds:Math.ceil((blockedUntil-Date.now())/1000)});
+ if(scanning)return res.status(429).json({error:'An inventory scan is already running. Please wait before checking again.'});
+ const zip=String(req.query.zip||'32084'),scope=String(req.query.scope||'local');
  if(!/^\d{5}$/.test(zip))return res.status(400).json({error:'Enter a valid five-digit US ZIP.'});
  const zips=scope==='local'?[zip]:[zip,...usZips.filter(z=>z!==zip)];
+ scanning=true;
+ try{
  const found=new Map(),errors=[];
  // Sequential with delay avoids burst traffic against Apple's undocumented endpoint.
  for(const z of zips){
@@ -64,11 +72,13 @@ app.get('/api/stock',async(req,res)=>{
    const prev=found.get(s.id);
    if(!prev)found.set(s.id,s);
    else for(const a of s.availability){const old=prev.availability.find(v=>v.part===a.part);if(old&&old.status==='unknown')Object.assign(old,a)}
-  }}catch(e){errors.push({zip:z,message:e.message})}
+  }}catch(e){errors.push({zip:z,message:e.message});if(Date.now()<blockedUntil)break;}
   if(zips.length>1)await sleep(150);
  }
  const stores=[...found.values()].sort((a,b)=>a.name.localeCompare(b.name));
  if(stores.length)track(stores);
+ if(Date.now()<blockedUntil)return res.status(503).json({error:blockMessage,code:'APPLE_BLOCKED',retryAfterSeconds:Math.ceil((blockedUntil-Date.now())/1000),stores:[],errors});
  res.status(stores.length?200:502).json({checkedAt:new Date().toISOString(),scope,zip,regionsChecked:zips.length,stores,errors,partial:errors.length>0,disclaimer:'Nationwide is best-effort ZIP sampling, not guaranteed coverage of every US Apple Store.'});
+ }finally{scanning=false}
 });
 app.listen(Number(process.env.PORT||3000),()=>console.log(`DuoRadar http://localhost:${process.env.PORT||3000}`));
