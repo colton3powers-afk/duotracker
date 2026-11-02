@@ -15,18 +15,30 @@ const usZips=[...new Set([...seeds,...extra])];
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function getZip(zip){
  const old=cache.get(zip); if(old&&Date.now()-old.at<CACHE_MS)return old.data;
- const url=new URL('https://www.apple.com/shop/retail/pickup-message');
- url.searchParams.set('pl','true');url.searchParams.set('location',zip);
- parts.forEach((part,i)=>url.searchParams.set(`parts.${i}`,part));
- const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),12000);
- try{
-  const response=await fetch(url,{signal:controller.signal,headers:{'Accept':'application/json','User-Agent':'Mozilla/5.0 (compatible; DuoRadar/1.0)'}});
-  if(!response.ok)throw new Error(`Apple returned HTTP ${response.status}`);
-  const json=await response.json();
-  if(!Array.isArray(json?.body?.stores))throw new Error('Apple response did not contain stores');
+ const merged=new Map();
+ // Apple may omit trailing parts in large requests. Check at most 12 at a time.
+ for(let offset=0;offset<parts.length;offset+=12){
+  const url=new URL('https://www.apple.com/shop/retail/pickup-message');
+  url.searchParams.set('pl','true');url.searchParams.set('location',zip);
+  parts.slice(offset,offset+12).forEach((part,i)=>url.searchParams.set(`parts.${i}`,part));
+  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),12000);
+  try{
+   const response=await fetch(url,{signal:controller.signal,headers:{'Accept':'application/json','User-Agent':'Mozilla/5.0 (compatible; DuoRadar/1.0)'}});
+   if(!response.ok)throw new Error(`Apple returned HTTP ${response.status}`);
+   const batch=await response.json();
+   if(!Array.isArray(batch?.body?.stores))throw new Error('Apple response did not contain stores');
+   for(const s of batch.body.stores){
+    const id=String(s.storeNumber||s.storeId||s.storeName),old=merged.get(id);
+    if(old)old.partsAvailability={...old.partsAvailability,...s.partsAvailability};
+    else merged.set(id,s);
+   }
+  }finally{clearTimeout(timeout)}
+  if(offset+12<parts.length)await sleep(150);
+ }
+ const json={body:{stores:[...merged.values()]}};
   const data=json.body.stores.map(s=>({id:String(s.storeNumber||s.storeId||s.storeName),name:s.storeName||'Apple Store',city:s.city||s.address?.city||'',state:s.state||s.address?.state||'',address:s.address?.address||s.address?.street||'',zip:s.address?.postalCode||'',availability:parts.map((part,i)=>({part,label:labels[i]||part,status:s.partsAvailability?.[part]?.pickupDisplay||'unknown',quote:s.partsAvailability?.[part]?.pickupSearchQuote||''}))}));
   cache.set(zip,{at:Date.now(),data});return data;
- }finally{clearTimeout(timeout)}
+
 }
 function track(stores){
  const now=new Date().toISOString();
