@@ -1,4 +1,5 @@
 import express from 'express';
+import fs from 'node:fs';
 import 'dotenv/config';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -16,9 +17,9 @@ const seeds=['32084','10001','02108','19103','20001','30303','33131','37203','43
 const extra=(process.env.EXTRA_ZIPS||'').split(',').map(s=>s.trim()).filter(s=>/^\d{5}$/.test(s));
 const usZips=[...new Set([...seeds,...extra])];
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-async function getZip(zip){
+async function getZip(zip,force=false){
  if(Date.now()<blockedUntil)throw new Error(blockMessage);
- const old=cache.get(zip); if(old&&Date.now()-old.at<CACHE_MS)return old.data;
+ const old=cache.get(zip); if(!force&&old&&Date.now()-old.at<CACHE_MS)return old.data;
  const merged=new Map();
  // Apple may omit trailing parts in large requests. Check at most 12 at a time.
  for(let offset=0;offset<parts.length;offset+=12){
@@ -48,18 +49,43 @@ async function getZip(zip){
   cache.set(zip,{at:Date.now(),data});return data;
 
 }
+const dataDir=process.env.DATA_DIR||path.join(__dirname,'data');
+fs.mkdirSync(dataDir,{recursive:true});
+const eventFile=path.join(dataDir,'stock-changes.jsonl'),stateFile=path.join(dataDir,'last-stock.json');
+let previousStock=new Map();
+try{previousStock=new Map(JSON.parse(fs.readFileSync(stateFile,'utf8')))}catch{}
+try{history.push(...fs.readFileSync(eventFile,'utf8').trim().split('\n').filter(Boolean).slice(-1000).map(line=>JSON.parse(line)).reverse())}catch{}
+const monitor={enabled:true,zip:'32084',intervalSeconds:10,lastAttempt:null,lastSuccess:null,lastError:null,running:false};
 function track(stores){
  const now=new Date().toISOString();
  for(const store of stores)for(const a of store.availability){
-  const key=`${store.id}:${a.part}`,current=a.status==='available';
-  if(!track.previous)track.previous=new Map();
-  const previous=track.previous.get(key);
-  if(previous===false&&current){history.unshift({time:now,store:store.name,city:store.city,label:a.label,part:a.part});history.length=Math.min(100,history.length)}
-  if(a.status!=='unknown')track.previous.set(key,current);
+  if(!['available','unavailable'].includes(a.status))continue;
+  const key=store.id+':'+a.part,previous=previousStock.get(key);
+  if(previous!==a.status&&(previous!==undefined||a.status==='available')){
+   const event={time:now,store:store.name,city:store.city,label:a.label,model:variants.find(v=>v.part===a.part)?.model,part:a.part,status:a.status,kind:previous===undefined?'initial':'change'};
+   fs.appendFileSync(eventFile,JSON.stringify(event)+'\n');
+   history.unshift(event);history.length=Math.min(1000,history.length);
+   console.log('Stock change: '+JSON.stringify(event));
+  }
+  previousStock.set(key,a.status);
  }
+ fs.writeFileSync(stateFile,JSON.stringify([...previousStock]));
 }
+async function monitorTick(){
+ if(scanning||Date.now()<blockedUntil||!parts.length)return;
+ scanning=true;monitor.running=true;monitor.lastAttempt=new Date().toISOString();
+ try{
+  const stores=await getZip(monitor.zip,true);
+  track(stores);monitor.lastSuccess=new Date().toISOString();monitor.lastError=null;
+  scanCache.set(monitor.zip+':local',{at:Date.now(),data:{checkedAt:monitor.lastSuccess,scope:'local',zip:monitor.zip,regionsChecked:1,stores,errors:[],partial:false,cached:false}});
+ }catch(e){monitor.lastError=e.message;console.error('Background monitor: '+e.message)}
+ finally{scanning=false;monitor.running=false}
+}
+setInterval(monitorTick,10000);
+setTimeout(monitorTick,1000);
 app.get('/api/config',(_req,res)=>res.json({configured:parts.length>0,variants,seedCount:usZips.length,cacheSeconds:CACHE_MS/1000}));
-app.get('/api/history',(_req,res)=>res.json({events:history,note:'Events observed by this running server only; no historical database.'}));
+app.get('/api/history',(_req,res)=>res.json({events:history,monitor:{...monitor,blockedUntil:blockedUntil?new Date(blockedUntil).toISOString():null},note:'Observed changes only. File history survives restarts only when DATA_DIR is on persistent storage.'}));
+app.get('/api/history/export',(_req,res)=>{res.type('text/plain');res.send(fs.existsSync(eventFile)?fs.readFileSync(eventFile,'utf8'):'')});
 app.get('/api/stock',async(req,res)=>{
  if(!parts.length)return res.status(503).json({error:'Set DUO_PARTS and/or PRO_MAX_PARTS in .env before live checks can run.'});
  if(Date.now()<blockedUntil)return res.status(503).json({error:blockMessage,code:'APPLE_BLOCKED',retryAfterSeconds:Math.ceil((blockedUntil-Date.now())/1000)});
