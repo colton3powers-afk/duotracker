@@ -1,5 +1,5 @@
 const $=id=>document.getElementById(id);const safe=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const models={duo:'iPhone Duo',pro:'iPhone 18 Pro Max'};const sizes=['256GB','512GB','1TB','2TB'];const colors={duo:[['Night Sky','#263d68'],['Star White','#f2f0e8']],pro:[['Space Black','#242529'],['Silver','#d6d9dc'],['Desert Titanium','#d3b58a'],['Deep Blue','#153962']]};
+const models={duo:'iPhone Duo',pro:'iPhone 18 Pro Max'};const sizes=['256GB','512GB','1TB','2TB'];const colors={duo:[['Night Sky','#263d68'],['Star White','#f2f0e8']],pro:[['Burgundy','#6b2439'],['Glacier','#c5dce5'],['Silver','#d6d9dc'],['Black','#242529']]};
 let active='duo',tab='search',stores=[],config={variants:[]},busy=false,previous=new Map();let watches=new Set(JSON.parse(localStorage.getItem('duoradar-watches')||'[]'));let saved=new Set(JSON.parse(localStorage.getItem('duoradar-saved')||'[]'));
 const key=(store,model,color,size)=>[store,model,color,size].join('|');const persist=()=>{localStorage.setItem('duoradar-watches',JSON.stringify([...watches]));localStorage.setItem('duoradar-saved',JSON.stringify([...saved]))};
 const variant=(model,color,size)=>config.variants.find(v=>v.model===model&&v.color===color&&v.storage===size);
